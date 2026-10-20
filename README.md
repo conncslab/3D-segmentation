@@ -1,4 +1,4 @@
-# CPSAM3D: 3D instance segmentation with cellpose-SAM
+# 3D Cell Segmentation
 
 A pipeline for segmenting objects such as cells or nuclei in 3D fluorescence images (z-stacks).
 It trains a model on human-corrected masks (human-in-the-loop), runs the trained model over the whole volume,
