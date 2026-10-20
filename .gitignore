@@ -1,0 +1,12 @@
+# data (tens of GB), experiments, scratch scripts
+data/
+experiments/
+mesh.py
+
+# these hold a GCP service-account private key -- never commit them
+cloudvolume_download.py
+cloudvolume_upload.py
+cloudvolume_tutorial.ipynb
+
+__pycache__/
+*.pyc
