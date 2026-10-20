@@ -15,7 +15,7 @@ def normalize99(Y,lower=0.01,upper=99.99,omni=False,value_range=None):
 
     value_range: if given a (low, high) tuple, normalizes with this fixed value
     instead of computing the image's own percentile (when a small patch is cut out
-    of a big mosaic like R3, normalizing by the patch's own percentile makes even
+    of a big volume, normalizing by the patch's own percentile makes even
     signal that would be negligible dataset-wide look relatively bright within that
     patch, so the global range is used as-is instead).
     """
@@ -81,7 +81,7 @@ def reshape(data, channels=[0,0], chan_first=False):
     ----------
 
     data : numpy array that's (Z,) Ly x Lx x nchan
-        this notebook always deals with 3D volumes: (Z, Ly, Lx) if single-channel,
+        this pipeline always deals with 3D volumes: (Z, Ly, Lx) if single-channel,
         or (Z, Ly, Lx, nchan) if the channel axis is already attached
 
     channels : list of int of length 2 (optional, default [0,0])
@@ -196,7 +196,7 @@ def reshape_and_normalize_data(train_data, test_data=None, channels=None, normal
 def reshape_train_test(train_data, train_labels, test_data, test_labels, channels, normalize=True, omni=False,
                        percentile_range=None):
 
-    """ check sizes and reshape train and test data for training (always 3D volumes in this notebook) """
+    """ check sizes and reshape train and test data for training (always 3D volumes in this pipeline) """
 
     nimg = len(train_data)
     #=====================Data check(start)====================
@@ -252,7 +252,7 @@ def preprocess(train_data, train_labels, test_data, test_labels, channels=[2, 1]
     Always deals with (Z,Y,X) 3D volumes only, so the reshape family of functions defaults to handling 3D.
 
     percentile_range: if given a (low, high) tuple, normalizes with this fixed global
-    range instead of each image's own percentile (the R3 HITL pipeline passes in the
+    range instead of each image's own percentile (the HITL pipeline passes in the
     global range it pre-scanned in step1).
     """
     return reshape_train_test(train_data, train_labels, test_data, test_labels, channels,
@@ -261,9 +261,9 @@ def preprocess(train_data, train_labels, test_data, test_labels, channels=[2, 1]
 
 def pad_to_3channel(data):
     """CPSAM (SAM ViT-L backbone) requires 3-channel input because patch_embed is
-    fixed as nn.Conv2d(3, ...). Our data is grayscale (1 channel), so the missing 2
-    channels are filled with 0 -- zero-padding rather than duplication, to follow
-    cellpose-main's own channel-handling convention (transforms.convert_image) as-is.
+    fixed as nn.Conv2d(3, ...). The pipeline handles grayscale (1-channel) data, so the
+    missing 2 channels are filled with 0 -- zero-padding rather than duplication, to follow
+    cellpose's own channel-handling convention (cellpose.transforms.convert_image) as-is.
 
     data: list of [1, Z, Y, X] (or [C,Z,Y,X], C<3) normalized volumes
     returns: list of [3, Z, Y, X]

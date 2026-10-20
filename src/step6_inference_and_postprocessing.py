@@ -1,5 +1,5 @@
 #========================================================================================
-# dynamics.py -- inference postprocessing (GPU only). There is no dZ, so flow tracing is
+# Inference post-processing (GPU only). There is no dZ, so flow tracing is
 # always per-z-slice, and compute_masks_2d turns each slice's traced positions into
 # instances whose ids mean nothing across z. Linking them into 3D cells is a separate pass
 # over the assembled per-slice volume (stitch.py: cellpose's own stitch3D rule, 1:1 IoU).
@@ -38,7 +38,7 @@ def fill_holes_and_remove_small_masks(masks, min_size=15):
 
 def resize_image(img0, Ly=None, Lx=None, rsz=None, interpolation=cv2.INTER_LINEAR):
     """Resize a (Z,Ly,Lx) volume to target (Ly,Lx) or by scale factor rsz -- z is never
-    resampled, only the xy plane is resized (same convention used throughout this notebook)."""
+    resampled, only the xy plane is resized (same convention used throughout this pipeline)."""
     if Ly is None:
         if not isinstance(rsz, (list, np.ndarray)):
             rsz = [rsz, rsz]
@@ -267,7 +267,7 @@ def compute_masks_2d(dP, cellprob, p=None, inds=None, niter=200, mask_threshold=
     dP            : [2, H, W]  (dY, dX) flow predictions for this slice (5x scale from training loss)
     cellprob      : [H, W]     raw logit (mask_threshold=0.0 -> cells where logit > 0)
     resize        : (Ly, Lx)   upsample output mask back to this resolution (None = keep native resolution)
-    flow_threshold: discard masks whose flow_error_2d > threshold (set 0/None to skip; v1's QC step)
+    flow_threshold: discard masks whose flow_error_2d > threshold (set 0/None to skip; cellpose's flow-error QC)
     min_size      : discard masks smaller than this pixel count
     seed_threshold: passed straight through to get_masks_2d -- see its docstring.
     """
@@ -321,7 +321,7 @@ def run_net_3d_tiled(img, net, device, bsize=256, tile_overlap=0.1, z_bsize=None
     by averaging) before the existing 256x256 xy tiling runs on each window --
     mirrors config.PATCH_SIZE_Z, analogous to how bsize=256 already re-tiles the xy
     plane to match training regardless of the input's own size. None (default, or
-    z_bsize >= Z) keeps the previous behavior: the whole Z depth in one forward pass.
+    z_bsize >= Z) runs the whole Z depth in one forward pass.
     """
     C, Z, Ly, Lx = img.shape
 
@@ -330,12 +330,11 @@ def run_net_3d_tiled(img, net, device, bsize=256, tile_overlap=0.1, z_bsize=None
     ntiles = len(ysub)
 
     # CPSAM's pos_embed is sliced to a FIXED bsize x bsize token grid at construction (see
-    # model/vit.py) -- it cannot accept a smaller tile at all. make_tiles only pads up to
+    # cellpose.vit) -- it cannot accept a smaller tile at all. make_tiles only pads up to
     # bsize when the image needs multiple tiles; for an image already <= bsize in a given
-    # axis (e.g. a full-mosaic block after an 8x rescale can end up at 210x210) it returns
-    # Lyp/Lxp equal to the image's own (smaller) size instead, which silently produced a
-    # sub-bsize tile here and crashed inside the ViT on the pos_embed addition. Pad
-    # explicitly for that case.
+    # axis (e.g. a small block after a large rescale) it returns Lyp/Lxp equal to the
+    # image's own (smaller) size instead, which would give a sub-bsize tile and fail inside
+    # the ViT on the pos_embed addition. Pad explicitly for that case.
     if Lyp < bsize or Lxp < bsize:
         Lyp, Lxp = max(Lyp, bsize), max(Lxp, bsize)
         ysub = [(y0, y0 + bsize) for y0, _ in ysub]
@@ -378,9 +377,8 @@ def run_net_3d_tiled(img, net, device, bsize=256, tile_overlap=0.1, z_bsize=None
 
 
 def dx_to_circ(dP):
-    """dP = [dy, dx], RAW (not unit-normalized) flow -- see
-    refs-code/cellpose-main/cellpose/plot.py:dx_to_circ and its real call site
-    (models.py:329, `plot.dx_to_circ(dP)` on the raw predicted dP). Cellpose's own
+    """dP = [dy, dx], RAW (not unit-normalized) flow -- same as cellpose.plot.dx_to_circ,
+    which cellpose itself calls on the raw predicted dP. Cellpose's own
     sinebow color wheel: brightness comes from this function's own percentile-99
     magnitude normalization below, so background/noise (genuinely near-zero raw flow)
     stays dark and only voxels with real, strong flow light up; hue reflects direction."""
@@ -398,14 +396,11 @@ def dx_to_circ(dP):
 
 def flow_stack_to_rgb(dY, dX, mask=None):
     """dY, dX: (Z,H,W) -> (Z,H,W,3) uint8 sinebow RGB stack. Passes dY,dX straight into
-    dx_to_circ RAW, matching cellpose's own call convention -- unit-normalizing here
-    first (an earlier version of this function did, mimicking masks_to_flows_gpu's own
-    normalization) throws away the relative-magnitude information dx_to_circ's
-    brightness scaling depends on, making background noise light up exactly as bright
-    as real cell-boundary flow. masks_to_flows_gpu's normalization is not actually
-    analogous: it only ever applies to already-known-foreground GT vectors (background
-    stays exactly 0 there by construction), unlike this function which was applying it
-    blindly to the whole predicted field."""
+    dx_to_circ RAW, matching cellpose's own call convention -- unit-normalizing them
+    first would throw away the relative-magnitude information dx_to_circ's brightness
+    scaling depends on, making background noise light up exactly as bright as real
+    cell-boundary flow. (masks_to_flows_gpu's unit normalization is not analogous: it only
+    applies to known-foreground GT vectors, where the background is exactly 0.)"""
     Z, H, W = dY.shape
     out = np.zeros((Z, H, W, 3), np.uint8)
     for z in range(Z):
@@ -421,7 +416,7 @@ def run_inference_cpsam3d(net, data, device, mask_threshold=0.0, bsize=256, tile
                           seed_threshold=10, flow_threshold=FLOW_THRESHOLD, min_size=MIN_SIZE_PX):
     """Run trained CPSAM3D on a list of (C,Z,H,W) volumes -> list of PER-SLICE instance masks
     ((Z,H,W) each, compute_masks_2d output stacked, ids local to each slice). This is what
-    the review works on (hitl.py's view masks, 3D_segmentation.py's assembled mosaic); linking the
+    the review works on (hitl.py's view masks, 3D_segmentation.py's assembled volume); linking the
     slices across z happens separately, once, on the assembled volume (stitch.py).
 
     flow_threshold / min_size: compute_masks_2d's flow QC and smallest kept piece (px at the
@@ -437,8 +432,8 @@ def run_inference_cpsam3d(net, data, device, mask_threshold=0.0, bsize=256, tile
     forward pass.
 
     rescale_factor != 1.0: downscales each image by 1/rescale_factor in XY before
-    running the net (config.RESCALE_FACTOR, for datasets with much-bigger-than-R3
-    cells). The predicted (dY,dX,cellprob) then gets upsampled back to the original
+    running the net (config.RESCALE_FACTOR, for objects too big for cellpose-SAM's
+    256 px tiles). The predicted (dY,dX,cellprob) then gets upsampled back to the original
     resolution BEFORE boundary-tracing/mask computation (bilinear) -- matching
     cellpose's own default (resample=True) behavior -- rather than tracing at the
     low rescaled resolution and nearest-neighbor-upscaling an already-discrete mask
@@ -447,9 +442,9 @@ def run_inference_cpsam3d(net, data, device, mask_threshold=0.0, bsize=256, tile
     regardless of rescale_factor. Tracing at the upsampled resolution also needs
     proportionally more flow-following iterations (niter) to actually converge --
     handled below (see the niter computation before the z-slice loop), matching
-    cellpose's own models.py:311-312.
+    cellpose's own niter = 200 / rescale.
 
-    No SizeModel/diameter rescale of our own beyond the above -- CPSAM (cellpose 4.x)
+    No SizeModel/diameter rescale beyond the above -- CPSAM (cellpose 4.x)
     has deprecated the diam_mean concept itself, and style is a dummy value this net
     doesn't actually compute.
     """
@@ -487,9 +482,9 @@ def run_inference_cpsam3d(net, data, device, mask_threshold=0.0, bsize=256, tile
         # step at a time; upsampling dP by rescale_factor also multiplies the pixel
         # distance every point needs to walk by that same factor, so niter must scale
         # up with it too or convergence falls short -- matches cellpose's own
-        # models.py:311-312 (`niter = int(200/rescale)`, cellpose's rescale = 1/RESCALE_FACTOR
-        # here, so niter = int(200*rescale_factor); reduces to the plain default 200
-        # when rescale_factor == 1.0).
+        # `niter = int(200/rescale)` (cellpose's rescale = 1/RESCALE_FACTOR here, so
+        # niter = int(200*rescale_factor); reduces to the plain default 200 when
+        # rescale_factor == 1.0).
         niter = int(200 * rescale_factor)
 
         masks2d = np.stack([

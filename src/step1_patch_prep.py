@@ -1,26 +1,25 @@
-"""Step1 -- mosaic access and view extraction for HITL.
+"""Step1 -- raw volume access and view extraction for HITL.
 
-Your dataset (one uint16 tif file per z-slice, each potentially many GB) can't be
-loaded into memory all at once, so each z-slice file is opened separately as a
-tifffile.memmap and only the needed region is read as a window (the whole thing is
-never loaded at once).
+A large raw volume (one combined (Z,H,W) tif, or one tif per z-slice, each potentially
+many GB) can't be loaded into memory all at once, so it is opened as tifffile.memmap(s)
+and only the needed region is read as a window (the whole thing is never loaded at once).
 
 ## Global normalization range
-Computing a percentile within just one view (1024x1024) makes even cells whose
+Computing a percentile within just one view (REVIEW_SIZE_XY square) makes even cells whose
 signal would be negligible relative to the whole dataset look relatively bright
-inside that one view, turning them into segmentation targets. So the whole mosaic
+inside that one view, turning them into segmentation targets. So the whole volume
 (all z's) is scanned once, streaming, to build a pixel-value histogram, from which the
 1~99 percentile range is derived and applied identically to every view. Pixels
 whose value is exactly 0 (unscanned or masked regions) are NOT excluded separately --
-included as-is, aiming for the same effect as normalizing against the whole image in
-Neuroglancer (near-noise, mostly peripheral faint cells become invisible). The scan
+included as-is, aiming for the same effect as viewing the whole volume with one contrast
+setting (near-noise, mostly peripheral faint cells stay dark). The scan
 result is cached to a file and reused -- one cache per volume (config.DATA_NORM_CACHE for
 the volume being predicted, config.TRAIN_NORM_CACHE for the one the training views come from).
 
 ## View selection
 No automatic tissue-priority logic -- takes the (x, y) coordinate the user picked
-directly in another visualization tool (Neuroglancer) as a command-line argument. The
-entire 1024x1024 grid cell that coordinate falls in is used as the view (there's no
+in a viewer of the raw volume as a command-line argument. The entire REVIEW_SIZE_XY
+grid cell that coordinate falls in is used as the view (there's no
 queue tracking which grid cells have already been used -- entirely left to the
 user's judgment).
 """
@@ -32,19 +31,19 @@ import tifffile
 from config import (PROJECT_NAME, DATA_DIR, Z_FILE_PATTERN, VOLUME_FILE, REVIEW_SIZE_XY,
                     REVIEW_SIZE_Z, NORM_Z_SUBSAMPLE)
 
-BAND_ROWS = 4096  # rows read at once during the histogram scan (~460MB/z/band, never loads the whole thing at once)
+BAND_ROWS = 4096  # rows read at once during the histogram scan (BAND_ROWS x width px per band, never the whole slice at once)
 
 
 def open_z_slice_memmaps(data_dir=DATA_DIR, volume_file=VOLUME_FILE):
-    """Opens the mosaic's z-slices as something indexable by [z] -> (H,W), with len()
+    """Opens the volume's z-slices as something indexable by [z] -> (H,W), with len()
     giving the total z count -- every other function in this file (and 3D_segmentation.py) only ever
     does mmaps[z] or len(mmaps), so both layouts below satisfy that contract identically.
     The z count is the data's own: every slice of the volume file, or every per-slice file.
 
-    volume_file set (e.g. kidney): the whole (Z,H,W) volume is one combined multi-page
+    volume_file set: the whole (Z,H,W) volume is one combined multi-page
     tif -- tifffile.memmap already returns a real 3D memmap for this, so it's returned as-is.
 
-    volume_file=None (default, e.g. R3): opens the per-z-slice files (Z_FILE_PATTERN, z = 0, 1, 2, ...
+    volume_file=None: opens the per-z-slice files (Z_FILE_PATTERN, z = 0, 1, 2, ...
     up to the first missing one) as a list of 2D memmaps, in order from z0 (bottom) to the last z."""
     if volume_file is not None:
         mm = tifffile.memmap(os.path.join(data_dir, volume_file))

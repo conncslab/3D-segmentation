@@ -1,4 +1,4 @@
-"""Final exhaustive inference over the full mosaic, followed by assembling the resulting
+"""Final exhaustive inference over the whole raw volume, followed by assembling the resulting
 blocks into one combined PER-SLICE (2D) segmentation.
 
 This step deliberately does NOT produce a 3D-stitched result; the one and only 3D linking
@@ -7,7 +7,7 @@ rule, stitch.py).
 
 Order of the whole flow this script sits in:
   1. the HITL loop (hitl.py) trains the main model
-  2. THIS SCRIPT: full-mosaic per-slice 2D masks, assembled into one array
+  2. THIS SCRIPT: whole-volume per-slice 2D masks, assembled into one array
   3. (optional) a human edits the per-slice masks
   4. one 3D linking over the (possibly edited) per-slice masks (the stitch)
 
@@ -41,7 +41,7 @@ This step assembles every block's saved PRE-STITCH per-slice masks into one glob
 per-slice array. Z-neighbors need no merge at all here (nothing is z-stitched in this
 script; see the module docstring), but XY-neighbor blocks (when BLOCK_SIZE doesn't cover
 the full width/height in one block) still do: they need the touching-face union-find merge
-(accumulate_touches, reused from the original design), and it has to run PER Z-SLICE, not
+(accumulate_touches), and it has to run PER Z-SLICE, not
 aggregated across a block's whole z-depth. pred_masks2d labels are per-slice-independent
 (compute_masks_2d renumbers every slice from scratch), so a touching-pixel count summed
 across multiple z-slices would conflate unrelated objects that merely share a coincidental
@@ -52,17 +52,16 @@ Concretely:
    every (row,col) block present, union xy-adjacent blocks' labels via
    accumulate_touches() (fresh UnionFind per slice), and assign each resulting group a
    freshly incrementing GLOBAL id -- written directly into one big in-memory
-   (total_Z,total_H,total_W) uint32 array (assemble_predmasks2d_combined()). For
-   kidney's actual grid (1x1 xy blocks) this union-find never finds a neighbor and
-   degenerates to a plain per-block relabel, which is the correct behavior.
+   (total_Z,total_H,total_W) uint32 array (assemble_predmasks2d_combined()). When the
+   volume fits in one xy block, this union-find never finds a neighbor and degenerates to
+   a plain per-block relabel, which is the correct behavior.
 2. That assembled array is the deliverable, saved as PREDMASKS2D_PATH -- exactly what
    the 3D linking (the stitch) needs, with no coordinate translation, since it's already
    in one global coordinate space.
 
 Known scaling limit (not solved here): assemble_predmasks2d_combined() builds the WHOLE
-per-slice array as one dense in-RAM uint32 ndarray. Fine for kidney ((286,1680,1680) uint32
-is ~3.2GB), but a mosaic whose full per-slice mask doesn't fit in RAM as one uint32 array
-(colon: (7,57706,40985) is ~66GB) needs it written to a memmap instead.
+per-slice array as one dense in-RAM uint32 ndarray, Z x H x W x 4 bytes. A volume whose
+per-slice mask doesn't fit in RAM that way needs it written to a memmap instead.
 
 The global id count can exceed uint16's range (65535), so results are uint32.
 """
@@ -90,21 +89,20 @@ PREDMASKS2D_PATH = os.path.join(OUT_DIR, PROJECT_NAME + '_predmasks2d_combined.t
 
 
 def latest_checkpoint():
-    """The main model checkpoint the HITL loop (hitl.py) has produced for this project.
+    """The main model checkpoint the HITL loop (hitl.py) has produced.
     Every HITL round retrains from scratch on all reviewed views (Cellpose's own
     human-in-the-loop guidance -- see hitl.py), so there is only ever the ONE most
     recent checkpoint (MAIN_CHECKPOINT_PATH), never a round_NNNN history. Raises a clear
     error if it hasn't been trained yet.
 
-    CPSAM3D_CKPT_OVERRIDE env var points this at any arbitrary checkpoint instead (e.g.
-    one of the smoothness-sweep .pth files)."""
+    CPSAM3D_CKPT_OVERRIDE env var points this at any other CPSAM3D checkpoint instead."""
     override = os.environ.get('CPSAM3D_CKPT_OVERRIDE')
     if override:
         return override
     if os.path.exists(MAIN_CHECKPOINT_PATH):
         return MAIN_CHECKPOINT_PATH
-    raise RuntimeError(f'{MAIN_CHECKPOINT_PATH}가 없습니다 -- '
-                        'HITL 라운드가 최소 1번은 완료돼야 3D_segmentation을 돌릴 수 있습니다.')
+    raise RuntimeError(f'{MAIN_CHECKPOINT_PATH} not found -- '
+                        'at least one HITL round (hitl.py) must finish before running 3D_segmentation.')
 
 
 def progress_path():
@@ -149,14 +147,14 @@ def run_block_inference():
     completed = {tuple(rc) for rc in progress['completed']}
 
     ckpt = latest_checkpoint()
-    print(f'[3D_segmentation] 체크포인트: {ckpt}')
+    print(f'[3D_segmentation] checkpoint: {ckpt}')
     net = CPSAM3D(ps=8, nout=3, bsize=256, z_crop_size=PATCH_SIZE_Z,
                   z_xy_ratio=Z_XY_ANISOTROPY).to(device)
     net.load_model(ckpt, device=device)
     net.eval()
 
     total = n_zblocks * n_rows * n_cols
-    print(f'[3D_segmentation] 전체 {n_zblocks}x{n_rows}x{n_cols}={total} block, 이미 완료 {len(completed)}개')
+    print(f'[3D_segmentation] {n_zblocks}x{n_rows}x{n_cols}={total} blocks in total, {len(completed)} already done')
 
     for zrow in range(n_zblocks):
         z0, z1 = zrow * BLOCK_SIZE_Z, min(total_z, (zrow + 1) * BLOCK_SIZE_Z)
@@ -195,9 +193,9 @@ def run_block_inference():
 
                 done = len(progress['completed'])
                 if done % 10 == 0 or done == total:
-                    print(f'[3D_segmentation] {done}/{total} block 완료 (block {zrow},{row},{col})')
+                    print(f'[3D_segmentation] {done}/{total} blocks done (block {zrow},{row},{col})')
 
-    print('[3D_segmentation] 전체 mosaic block 추론 완료.')
+    print('[3D_segmentation] block inference over the whole volume done.')
 
 
 def predmasks2d_block_path(zrow, row, col):
@@ -211,12 +209,10 @@ def accumulate_touches(uf, key_a, edge_a, key_b, edge_b):
     A label pair unions only if it clears MIN_TOUCH_PIXELS AND each is the OTHER's single
     strongest touching partner across this face (mutual best match) -- plain "union on any
     touch >= MIN_TOUCH_PIXELS" is transitive (A-B touch + B-C touch unions A,B,C together
-    even if A and C are unrelated), and MIN_TOUCH_PIXELS=3 against a full block face
-    (thousands of instances, jagged per-slice mask boundaries) chains almost everything
-    together: measured on the real kidney run, 597 of 1079 block-local fragments ended up
-    fused into one global id spanning the entire 286-slice volume, 71.8% of all foreground.
-    Requiring a mutual best match brought that run to 773 instances with the largest at
-    1.3% -- in line with the 738 predicted by the annotated patch's own cell density."""
+    even if A and C are unrelated), and with a small MIN_TOUCH_PIXELS against a full block
+    face (thousands of instances, jagged per-slice mask boundaries) such chains can fuse a
+    large share of the foreground into one global id. The mutual-best-match requirement
+    keeps each union one-to-one."""
     shape = tuple(min(sa, sb) for sa, sb in zip(edge_a.shape, edge_b.shape))
     slc = tuple(slice(0, s) for s in shape)
     a = edge_a[slc].astype(np.int64)
@@ -313,8 +309,8 @@ def assemble_predmasks2d_combined(progress):
                 h, w = arr.shape
                 combined[z0 + local_z, y0:y0 + h, x0:x0 + w] = lut[arr]
 
-        print(f'[3D_segmentation] z-chunk {zrow + 1}/{n_zblocks} 조립 완료 '
-              f'({len(present)}개 block, depth={chunk_depth})')
+        print(f'[3D_segmentation] z-chunk {zrow + 1}/{n_zblocks} assembled '
+              f'({len(present)} blocks, depth={chunk_depth})')
 
     return combined
 
@@ -325,8 +321,8 @@ def run_merge_and_combine():
 
     combined = assemble_predmasks2d_combined(progress)
     tifffile.imwrite(PREDMASKS2D_PATH, combined, bigtiff=True)
-    print(f'[3D_segmentation] per-slice(2D) 결과 저장: {PREDMASKS2D_PATH} '
-          f'(필요하면 수정한 뒤 stitch로 3D 연결)')
+    print(f'[3D_segmentation] per-slice (2D) masks saved: {PREDMASKS2D_PATH} '
+          f'(edit them if needed, then link them in 3D with stitch.py)')
 
 
 def main():

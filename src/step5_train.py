@@ -32,8 +32,8 @@ def original_random_rotate_and_resize(X, Y=None, scale_range=1., xy=(224, 224),
     aux: optional list of [1, Z, Ly, Lx] extra per-item arrays (e.g. the raw instance-id
         mask) that need the exact same crop/rotate/flip/zflip applied (nearest-neighbor,
         like the mask channel) but must NOT go through Y's flow-specific sign-flip/
-        rotation math -- kept fully separate from Y so callers that don't pass aux see
-        identical behavior to before.
+        rotation math -- kept fully separate from Y so callers that don't pass aux are
+        unaffected.
 
     Returns:
         imgi:    [nimg, nchan, Z, 224, 224]
@@ -151,11 +151,11 @@ def random_rotate_and_resize(X, Y=None, scale_range=1., xy=(224, 224),
     augmentation runs -- the z-axis analogue of how xy always crops down from a larger
     input to `xy`. This is what lets a REVIEW_SIZE_Z-thick HITL patch and a smaller
     PATCH_SIZE_Z-thick model input genuinely differ (config.py). None (default) keeps
-    each item's full Z depth, unchanged from before.
+    each item's full Z depth.
 
-    min_train_masks>0: per-crop retry instead of the old whole-patch filter -- a patch
-    can easily clear a low whole-patch cell count while most of its 1024x1024 area is
-    still empty background, so a crop drawn from a "kept" patch could still land on a
+    min_train_masks>0: per-crop retry rather than a whole-patch filter -- a patch can
+    easily clear a low whole-patch cell count while most of its area is still empty
+    background, so a crop drawn from a "kept" patch could still land on a
     cell-free region. Each item in the batch is drawn (using the mask channel, warped
     identically via original_random_rotate_and_resize's aux=) and, if the crop's total
     cell count (summed per z-slice, since labels_to_flows_3d renumbers each z-slice
@@ -220,8 +220,7 @@ def own_boundary_mask(aux, dilate_px=5):
     """aux: (B,1,Z,H,W) raw instance-id labels (int, from random_rotate_and_resize's own aux output).
     Returns (B,Z,H,W) bool mask, True along every non-zero instance's own outline (where its label
     meets anything else, background included), widened by dilate_px but kept inside the foreground:
-    the band the z-smoothness term is averaged over. Replaced the contact-only band (boundary
-    between two DIFFERENT instances) on 2026-09-27 after a side-by-side comparison in webKnossos."""
+    the band the z-smoothness term is averaged over."""
     B, _, Z, H, W = aux.shape
     mask = np.zeros((B, Z, H, W), dtype=bool)
     for b in range(B):
@@ -277,16 +276,15 @@ def train_model(net, device, train_flows, train_data,
     freeze_encoder=True, unfreeze_last_n_blocks=0: freeze the whole encoder, train
     only 3D fusion + readout. freeze_encoder=True, unfreeze_last_n_blocks=N: freeze
     the rest but additionally unfreeze only the encoder's last N transformer blocks.
-    Unfreezing all 24 blocks OOMs on this GPU (16GB) even at batch_size=1 (measured),
-    so freeze_encoder=False (unfreeze everything) can't be used without gradient
-    checkpointing.
+    Unfreezing all 24 blocks can run out of memory even at batch_size=1 on a 16 GB GPU,
+    so freeze_encoder=False (unfreeze everything) may need gradient checkpointing.
 
-    No diam_mean-based size rescale -- matching cellpose-SAM's official recipe
-    (`paper/cpsam/train_subsets.py`'s `rescale = not transformer`, and
+    No diam_mean-based size rescale -- matching cellpose-SAM's official recipe (cellpose
+    repository: `paper/cpsam/train_subsets.py`'s `rescale = not transformer`, and
     `cellpose/train.py`'s `train_seg(rescale=False)` default), the ViT-based CPSAM is
     trained to directly adapt to varying cell sizes without a SizeModel/style vector.
 
-    No test GT mask exists yet, so AP is evaluated on the training volumes themselves. This is
+    No held-out set is used: AP is evaluated on the training volumes themselves. This is
     NOT a generalization metric (same data used for training) -- it's a sanity check that
     the net -> compute_masks_2d pipeline works, and a rough signal for overfitting.
 
@@ -295,21 +293,20 @@ def train_model(net, device, train_flows, train_data,
 
     patch_size_z: passed straight through to random_rotate_and_resize -- draws a random
     patch_size_z-thick z-window from each item's full z depth per crop (config.PATCH_SIZE_Z).
-    None (default) keeps each item's full z depth, unchanged from before.
+    None (default) keeps each item's full z depth.
 
     zsmooth_boundary_weight_flow/zsmooth_boundary_weight_cellprob: L1 penalty between
     the net's own predictions (not GT) at adjacent z-slices, averaged ONLY over a band
     along each GT instance's own outline (own_boundary_mask), not the whole image -- a
     uniform whole-volume mean would dilute the signal into the much larger already-smooth
     background. zsmooth_boundary_dilate_px is the band's width, measured inward from the
-    outline. (Until 2026-09-27 the band covered only contacts between two DIFFERENT
-    instances; see config.py.)
+    outline. Both weights 0 turn the term off.
     """
     net.set_encoder_trainable(not freeze_encoder, unfreeze_last_n_blocks=unfreeze_last_n_blocks)
 
-    # min_train_masks is no longer a whole-patch filter (a 1024x1024 patch can easily
-    # clear a low whole-patch cell count while most of its area is still empty
-    # background) -- it's enforced per-crop instead, inside random_rotate_and_resize
+    # min_train_masks is not a whole-patch filter (a patch can easily clear a low
+    # whole-patch cell count while most of its area is still empty background) --
+    # it's enforced per-crop instead, inside random_rotate_and_resize
     # below (redraws a crop if it lands on too few cells).
     train_data_f  = train_data
     train_flows_f = train_flows
@@ -331,8 +328,7 @@ def train_model(net, device, train_flows, train_data,
     # learning rate schedule -- 10 epoch warmup then held constant at learning_rate for
     # the rest of training (no end-of-training decay). Cellpose's own train_seg
     # schedule halves the LR repeatedly over the final stretch of training; that decay
-    # was cutting each HITL round's effective learning short (round-over-round loss
-    # kept stalling even as n_epochs increased), so it's dropped here.
+    # is dropped here so every HITL round keeps learning at the full rate to its end.
     LR = np.linspace(0, learning_rate, 10)
     LR = np.append(LR, learning_rate * np.ones(max(0, n_epochs - 10)))
     LR = LR[:n_epochs]
@@ -389,8 +385,8 @@ def train_model(net, device, train_flows, train_data,
         # -- AP evaluation (train self-eval) --
         # CPSAM3D's position embedding is fixed to exactly 256x256 (32x32 tokens), so
         # unlike CPnet it can't take an arbitrary-size volume whole (just padded to a
-        # multiple of 16) -- our training volumes are 768x1024/1024x1024, so they must
-        # go through 256x256 tiling (run_net_3d_tiled).
+        # multiple of 16) -- training volumes larger than 256x256 must go through
+        # 256x256 tiling (run_net_3d_tiled).
         #
         # Evaluated per z-slice independently (compute_masks_2d), NOT linked across z like
         # the final inference output (stitch) -- the GT mask channel is per-slice-

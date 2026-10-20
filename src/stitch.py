@@ -10,7 +10,7 @@ a hitl view's masks, ... Ids may be local to each slice or unique over the volum
 out.tif: (Z,H,W) uint32 3D labels 1..N, numbered in order of first appearance (z, then input id).
 Default: <masks2d>_stitched.tif next to the input.
 
-Streams, so a mosaic-scale volume fits (colon: (7,57706,40985) uint32 is 66 GB): slices are read
+Streams, so a volume much larger than RAM fits: slices are read
 BAND_ROWS rows at a time from a memmap of the input, overlaps are counted per overlapping id pair
 (never a dense id x id IoU matrix like cellpose's), and the labels go straight into an on-disk
 memmap of the output.
@@ -28,7 +28,7 @@ from scipy.sparse.csgraph import connected_components
 
 from config import STITCH_THRESHOLD
 
-BAND_ROWS = 2048   # rows of a slice handled at once (colon: 2048 x 40985 px per band)
+BAND_ROWS = 2048   # rows of a slice handled at once (BAND_ROWS x width px per band)
 
 
 def open_masks(path):

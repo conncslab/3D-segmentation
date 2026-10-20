@@ -2,15 +2,15 @@
 the original image into a refined 3-channel prediction (dY,dX,cellprob). No dZ --
 z-continuity is left to IoU-based stitching at inference time, not a learned z-flow.
 
-Block style follows cellpose_v1's own U-Net (refs-code/cellpose_v1/cellpose/
-resnet_torch.py: resdown/resup) -- residual blocks with a 1x1 projection shortcut
+Block style follows the U-Net of cellpose v1-3 (cellpose/resnet_torch.py:
+resdown/resup) -- residual blocks with a 1x1 projection shortcut
 where the channel count changes, pre-activation ordering (norm -> act -> conv), and
 additive (not concatenated) skip connections between encoder and decoder. cellpose's
 own ablation (Stringer et al., Nature Methods 2021) found this combination
 outperforms a standard (non-residual, concatenation-skip) U-Net for this same
-flow-prediction task. Two differences from cellpose_v1: GroupNorm instead of
-BatchNorm2d (this project trains at batch_size=2, too small for BatchNorm's running
-statistics to be reliable), and no style vector (cellpose_v1's resup injects a global
+flow-prediction task. Two differences from that U-Net: GroupNorm instead of
+BatchNorm2d (HITL training runs at batch sizes of 1-2, too small for BatchNorm's running
+statistics to be reliable), and no style vector (cellpose's resup injects a global
 style vector before its second conv; not used here).
 
 Zero-initialized final layer, so on its own this module outputs exactly zero at
@@ -68,7 +68,7 @@ def _group_count(channels, max_groups=32):
 
 
 def _conv3d_preact(in_ch, out_ch, kernel_size=3):
-    """norm -> act -> conv (pre-activation), matching cellpose_v1's batchconv."""
+    """norm -> act -> conv (pre-activation), matching cellpose's batchconv."""
     return nn.Sequential(
         nn.GroupNorm(_group_count(in_ch), in_ch),
         nn.GELU(),
@@ -78,7 +78,7 @@ def _conv3d_preact(in_ch, out_ch, kernel_size=3):
 
 def _conv3d_preact_noact(in_ch, out_ch, kernel_size=1):
     """norm -> conv, no activation -- used only for the projection shortcut,
-    matching cellpose_v1's batchconv0."""
+    matching cellpose's batchconv0."""
     return nn.Sequential(
         nn.GroupNorm(_group_count(in_ch), in_ch),
         nn.Conv3d(in_ch, out_ch, kernel_size=kernel_size, padding=kernel_size // 2),
@@ -86,7 +86,7 @@ def _conv3d_preact_noact(in_ch, out_ch, kernel_size=1):
 
 
 class ResDown3D(nn.Module):
-    """cellpose_v1-style residual encoder block (resdown, 3D): 4 conv layers in 2
+    """cellpose-style residual encoder block (resdown, 3D): 4 conv layers in 2
     residual sub-blocks. The first sub-block uses a 1x1 projection shortcut (since
     in_ch != out_ch here); the second is a plain residual (out_ch == out_ch, no
     projection needed)."""
@@ -106,7 +106,7 @@ class ResDown3D(nn.Module):
 
 
 class ResUp3D(nn.Module):
-    """cellpose_v1-style residual decoder block (resup, 3D, no style vector). The
+    """cellpose-style residual decoder block (resup, 3D, no style vector). The
     encoder skip y (already at out_ch channels) is added in right after the first
     conv -- an additive skip, not a concatenation, so y's channel count must already
     match out_ch."""

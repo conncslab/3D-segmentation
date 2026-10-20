@@ -19,7 +19,7 @@ to IoU-based stitching at inference time rather than a learned z-flow.
 dtype: cellpose's own train.py also casts a bfloat16 net back to float32 before
 training starts (so torch.autocast(dtype=net.dtype) becomes effectively a no-op) and
 casts it back afterward -- meaning actual fine-tuning always runs in float32 anyway.
-Here we skip that round trip and just fix it to float32 from the start.
+This model skips that round trip and is float32 from the start.
 """
 import torch
 import torch.nn as nn
@@ -33,14 +33,14 @@ from model.unet3d import UNet3D
 class CPSAM3D(nn.Module):
     """Stock CPSAM (per slice) + UNet3D (3-channel: dY,dX,cellprob).
 
-    forward input: (B, C, Z, H, W) -- the same shape the existing 3D augmentation
+    forward input: (B, C, Z, H, W) -- the same shape the 3D augmentation
     (random_rotate_and_resize) produces. Output: (y, style) -- y: (B, nout, Z, H, W) =
     [dY,dX,cellprob].
 
     style is a dummy (0) for SizeModel compatibility. The original CPSAM also doesn't
     actually compute a style and returns 0 (cellpose 4.x deprecated diam_mean itself,
-    no SizeModel), and this branch likewise runs inference at rescale=1.0 with no
-    diameter rescale.
+    no SizeModel), and this model likewise runs without any diameter rescale (only the
+    fixed config.RESCALE_FACTOR, applied outside the model).
     """
 
     def __init__(self, ps=8, nout=3, bsize=256, rdrop=0.4, z_crop_size=7, z_xy_ratio=1.0):
@@ -60,15 +60,15 @@ class CPSAM3D(nn.Module):
         self.base is a stock nout=3 CPSAM so every tensor (including the readout)
         matches the checkpoint's shapes exactly, unlike a modified-nout backbone.
         strict=False only because the checkpoint itself doesn't include
-        diam_mean/diam_labels (BaseModel's own SizeModel-compat dummies, unrelated to
-        this project's nout change) -- not a shape mismatch."""
+        diam_mean/diam_labels (BaseModel's own SizeModel-compat dummies) -- not a
+        shape mismatch."""
         path = cache_model_path('cpsam_v2')
         sd = torch.load(path, map_location=device, weights_only=True)
         missing, unexpected = self.base.load_state_dict(sd, strict=False)
         assert not unexpected, f'unexpected keys in checkpoint: {unexpected}'
         assert set(missing) <= {'diam_mean', 'diam_labels'}, f'unexpected missing keys: {missing}'
-        print(f'[CPSAM3D] pretrained cellpose-SAM 전부 그대로 로드 ({len(sd)}개 텐서, '
-              f'diam_mean/diam_labels(SizeModel용, 미사용)만 체크포인트에 없어서 기본값 유지).')
+        print(f'[CPSAM3D] pretrained cellpose-SAM loaded in full ({len(sd)} tensors; '
+              f'diam_mean/diam_labels, unused SizeModel dummies not in the checkpoint, keep their defaults).')
 
     def forward(self, x):
         # x: (B, C=3, Z, H, W)
@@ -90,9 +90,9 @@ class CPSAM3D(nn.Module):
     def set_encoder_trainable(self, trainable, unfreeze_last_n_blocks=0):
         """Stage-1 strategy: freeze the encoder, train only the unet (trainable=False).
         Stage-2: instead of unfreezing everything, additionally train only the last
-        unfreeze_last_n_blocks transformer blocks -- unfreezing all 24 blocks OOMs on
-        this GPU (16GB) even at batch_size=1 (measured), while unfreezing only the last
-        4 blocks fits in 11.7GB at batch_size=2.
+        unfreeze_last_n_blocks transformer blocks -- unfreezing all 24 blocks can run out
+        of memory even at batch_size=1 on a 16 GB GPU, while unfreezing only the last few
+        blocks needs far less.
         (patch_embed is accessed via .weight.data inside cellpose's own CPSAM.forward,
         so no gradient ever flows through it regardless of requires_grad)"""
         for p in self.base.encoder.parameters():

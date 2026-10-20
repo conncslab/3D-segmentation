@@ -27,14 +27,14 @@ def _extend_centers_gpu(neighbors, centers, isneighbor, Ly, Lx, n_iter=200, devi
     meds = torch.from_numpy(centers.astype(int)).to(device).long() 
     isneigh = torch.from_numpy(isneighbor).to(device)
     for i in range(n_iter):
-        T[:, meds[:,0], meds[:,1]] +=1 # 세포 중심에 열 주입
+        T[:, meds[:,0], meds[:,1]] +=1 # inject heat at cell centers
         Tneigh = T[:, pt[:,:,0], pt[:,:,1]]
-        Tneigh *= isneigh # 다른 마스크로 새는 열 차단
-        T[:, pt[0,:,0], pt[0,:,1]] = Tneigh.mean(axis=1) # 이웃으로 확산
+        Tneigh *= isneigh # block heat from leaking into other masks
+        T[:, pt[0,:,0], pt[0,:,1]] = Tneigh.mean(axis=1) # diffuse to neighbors
     
     T = torch.log(1.+ T)
     # gradient positions
-    grads = T[:, pt[[2,1,4,3],:,0], pt[[2,1,4,3],:,1]] # 상,하,우,좌
+    grads = T[:, pt[[2,1,4,3],:,0], pt[[2,1,4,3],:,1]] # (top, bottom, right, left)
     dy = grads[:,0] - grads[:,1]
     dx = grads[:,2] - grads[:,3]
 
@@ -195,7 +195,7 @@ def labels_to_flows(labels, files=None, use_gpu=False, device=None, redo_flows=F
 
 
 def labels_to_flows_3d(labels, files=None, use_gpu=False, device=None, redo_flows=False):
-    """ project-specific wrapper (not from cellpose_v1) -- applies labels_to_flows'
+    """ pipeline-specific wrapper (not part of cellpose) -- applies labels_to_flows'
     per-slice 2D diffusion (no dZ, no cross-z coupling) independently to every
     z-slice of a 3D mask volume, then stacks the results back into one 3D flow
     volume per patch. This is how a 3D U-Net that only refines (dY,dX,cellprob)

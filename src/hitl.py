@@ -1,5 +1,5 @@
 """Human-in-the-loop main loop for the main segmentation model (CPSAM3D). Each run takes a
-single coordinate the user picked directly in Neuroglancer etc. as a command-line argument:
+single coordinate the user picked in a viewer of the raw volume as a command-line argument:
 
     python hitl.py <x> <y> [z]
 
@@ -9,15 +9,15 @@ Every time it runs:
      round RETRAINS FROM THE SAME STARTING POINT (cpsam_v2 + a zero-init U-Net) on ALL
      reviewed views at once, for N_EPOCHS -- never continues from a previous round's
      checkpoint. This follows
-     Cellpose's own human-in-the-loop guidance (refs-code/cellpose-main/docs/train.rst,
-     gui.rst): continuing from a prior retraining biases the model toward whichever images
+     Cellpose's own human-in-the-loop guidance (cellpose documentation, training and GUI
+     sections): continuing from a prior retraining biases the model toward whichever images
      it already trained on, whereas starting fresh each time weighs every reviewed view
      equally. Only the ONE latest checkpoint is ever kept (MAIN_CHECKPOINT_PATH). Below
      BOOTSTRAP_N_VIEWS reviewed views nothing is trained yet at all.
      crops_per_epoch = accumulated view count * AREA_RATIO so the whole area gets sampled
      evenly.
   2. Extracts a new view at the grid cell the given coordinate falls in and predicts its
-     per-slice masks -- with our own CPSAM3D once it has been trained, before that with the
+     per-slice masks -- with the trained CPSAM3D once there is one, before that with the
      starting point as is (= plain cellpose-SAM, the zero-init U-Net adds nothing). Either way masks.tif is PLAIN PER-SLICE 2D
      segmentation, no z-stitching: training the main model only ever needs per-slice masks
      (labels_to_flows_3d renumbers ids independently per slice regardless), and a stitched
@@ -126,8 +126,8 @@ def init_model(device):
     """CPSAM3D at the starting point of every HITL round: cpsam_v2 + a zero-init U-Net."""
     # rdrop=0.0: CPSAM's default layer-drop only matters for an unfrozen encoder -- here
     # the encoder stays fully frozen, so rdrop would just perturb the residual base the
-    # UNet has to correct by ~6-10% every step (measured) and create a train/eval
-    # mismatch, for no regularization benefit (nothing trainable is being dropped).
+    # UNet has to correct at every step and create a train/eval mismatch, for no
+    # regularization benefit (nothing trainable is being dropped).
     net = CPSAM3D(ps=8, nout=3, bsize=256, z_crop_size=PATCH_SIZE_Z,
                   z_xy_ratio=Z_XY_ANISOTROPY, rdrop=0.0).to(device)
     net.load_pretrained_cpsam(device=device)
@@ -138,9 +138,8 @@ def train_main_model(img_names, device, p_low, p_high):
     """A fresh CPSAM3D (init_model) fine-tuned on every reviewed view in img_names; saved to
     MAIN_CHECKPOINT_PATH and returned."""
     # torch.manual_seed before construction: with only a handful of corrected views,
-    # held-out quality varies a lot by which random init the UNet's fresh layers happen
-    # to draw (measured directly: three otherwise-identical training runs landed at
-    # held-out AP@0.9 of 0.614/0.622/0.720 from seed alone).
+    # quality can vary noticeably with the random init of the UNet's fresh layers, so the
+    # seed is fixed to keep rounds reproducible and comparable.
     torch.manual_seed(1234)
     net = init_model(device)
 
@@ -178,12 +177,12 @@ def train_main_model(img_names, device, p_low, p_high):
             zsmooth_boundary_dilate_px=ZSMOOTH_BOUNDARY_DILATE_PX,
         )
     net.save_model(MAIN_CHECKPOINT_PATH)
-    print(f'[hitl] 본 모델 체크포인트 저장: {MAIN_CHECKPOINT_PATH}')
+    print(f'[hitl] main model checkpoint saved: {MAIN_CHECKPOINT_PATH}')
     return net
 
 
 def predict_view(net, view, device, p_low, p_high, name):
-    """Our trained CPSAM3D on one view: <name>_masks.tif (per-slice masks) and
+    """The trained CPSAM3D on one view: <name>_masks.tif (per-slice masks) and
     <name>_flow_vis.tif (flow preview) into HITL_DIR."""
     data, _, _ = reshape_and_normalize_data([view.astype(np.float32)], test_data=None,
                                             channels=[2, 1], percentile_range=(p_low, p_high))
@@ -231,15 +230,15 @@ def main():
 
     coord_str = f'({x},{y},{z})' if z is not None else f'({x},{y})'
     z_str = f', z0={z0}' if z is not None else ''
-    print(f'[hitl] 새 view 추출/추론 완료: {name} (좌표={coord_str} -> grid row={row}, col={col}{z_str})')
-    print(f'  -> 검토할 파일: 원본 {os.path.abspath(img_path)}')
-    print(f'                  모델 마스크 {os.path.abspath(os.path.join(HITL_DIR, f"{name}_masks.tif"))}')
-    print(f'  -> 고친 per-slice 마스크를 {name}_masks_modified.tif 이름으로 같은 폴더에 저장하면 다음 실행 때 학습에 '
-          f'들어갑니다 (없으면 이 view는 학습에서 빠집니다).')
+    print(f'[hitl] new view extracted and predicted: {name} (coordinate={coord_str} -> grid row={row}, col={col}{z_str})')
+    print(f'  -> files to review: image       {os.path.abspath(img_path)}')
+    print(f'                      model masks {os.path.abspath(os.path.join(HITL_DIR, f"{name}_masks.tif"))}')
+    print(f'  -> save the corrected per-slice masks as {name}_masks_modified.tif in the same folder and the next run '
+          f'trains on them (without that file this view is left out of training).')
     n_after_this = len(reviewed) + 1
     if n_after_this < BOOTSTRAP_N_VIEWS:
-        print(f'  -> 아직 bootstrap: 검토 후 {n_after_this}/{BOOTSTRAP_N_VIEWS}개, '
-              f'{BOOTSTRAP_N_VIEWS - n_after_this}개 더 모아야 첫 학습이 시작됩니다.')
+        print(f'  -> still bootstrapping: {n_after_this}/{BOOTSTRAP_N_VIEWS} views after this review, '
+              f'{BOOTSTRAP_N_VIEWS - n_after_this} more needed before the first training.')
 
 
 if __name__ == '__main__':
