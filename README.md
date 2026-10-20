@@ -68,6 +68,8 @@ Requirements:
 Open `src/config.py` and set the items below for your data. The docstring at the top lists the items you must change
 and the ones to check depending on your data.
 
+![Training views and what the model sees](docs/config_views.svg)
+
 | Item | Description |
 |---|---|
 | `PROJECT_NAME` | Prefix of the output file names |
@@ -171,6 +173,8 @@ Then `python src/hitl.py <x> <y>` trains on these views and predicts the new vie
 ```bash
 python src/3D_segmentation.py
 ```
+
+![Whole-volume inference in blocks](docs/config_blocks.svg)
 
 - Runs `HITL_DIR/models/main/model.pth` over the whole volume block by block (`BLOCK_SIZE`, `BLOCK_SIZE_Z`).
   Each block is read with a margin around it (`MARGIN`, `MARGIN_Z`), so objects at block borders are segmented with
